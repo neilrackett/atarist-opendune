@@ -89,19 +89,14 @@ static bool s_mpu_initialized;
 
 static bool s_mpuIgnore = false;
 
-/* MPU_Interrupt() may run asynchronously to the functions below that change
- * the sequencer state (a thread on Windows, a timer interrupt on Atari).
- * While one of them runs, ticks are held back and played afterwards. */
+/* MPU_Interrupt() may be called from an interrupt (a timer on Atari) that
+ * lands while one of the functions below changes the sequencer state : the
+ * tick is then held back, and played once they are done. */
 static volatile uint8 s_mpuLock = 0;	/*!< Nesting depth of the state-changing functions. */
 static volatile uint8 s_mpuOwed = 0;	/*!< Ticks held back meanwhile. Only MPU_Interrupt() writes it. */
 
-#if defined(__GNUC__)
-#define MPU_BARRIER() __asm__ __volatile__("" ::: "memory")
-#else
-#define MPU_BARRIER()
-#endif
-#define MPU_LOCK()   do { s_mpuLock++; MPU_BARRIER(); } while (0)
-#define MPU_UNLOCK() do { MPU_BARRIER(); s_mpuLock--; } while (0)
+#define MPU_LOCK()   do { s_mpuLock++; COMPILER_BARRIER(); } while (0)
+#define MPU_UNLOCK() do { COMPILER_BARRIER(); s_mpuLock--; } while (0)
 
 static void MPU_ReleaseData(uint16 index);
 static void MPU_StopAllNotes(MSData *data);
@@ -332,7 +327,7 @@ static void MPU_Control(MSData *data, uint8 chan, uint8 control, uint8 value)
 			} else {
 				/* lock */
 				uint8 newChan = MPU_LockChannel();	/* lock new channel and map to current channel in sequence */
-				if (newChan == 0xFF) newChan = chan;
+				if (newChan == 0xFF) newChan = data->chanBase[chan];
 
 				data->chanMaps[chan] = newChan;
 			}
@@ -885,6 +880,7 @@ static void MPU_StopAllNotes(MSData *data)
 		data->noteOnChans[i] = 0xFF;
 		note = data->noteOnNotes[i];
 		chan = data->chanMaps[chan];
+		s_mpu_noteOnCount[chan]--;
 
 		/* Note Off */
 		MPU_Send(0x80 | chan, note, 0);
@@ -1071,7 +1067,8 @@ void MPU_ClearData(uint16 index)
 
 /**
  * Play a channel of a sequence on another channel, for when two sequences
- * that were not written to play together use the same channel.
+ * that were not written to play together use the same channel. That channel
+ * is then kept out of the channels other sequences lock (CHAN_LOCK).
  * @param index The sequence, as returned by MPU_SetData().
  * @param chan The channel the sequence uses.
  * @param physical The channel to play it on.
@@ -1088,6 +1085,7 @@ void MPU_SetChannelMap(uint16 index, uint8 chan, uint8 physical)
 	if (data != NULL) {
 		data->chanBase[chan] = physical;
 		data->chanMaps[chan] = physical;
+		s_mpu_lockStatus[physical] |= 0x40;	/* lock-protected */
 	}
 
 	MPU_UNLOCK();
